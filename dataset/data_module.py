@@ -1,17 +1,19 @@
 from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader
 from dataset.data_helper import create_datasets
-
-
+from data_collator import DataCollatorForSupervisedDataset
 
 class DataModule(LightningDataModule):
 
     def __init__(
             self,
-            args
+            args,
+            tokenizer
     ):
         super().__init__()
         self.args = args
+        self.tokenizer = tokenizer
+        self.data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
 
     def prepare_data(self):
         """
@@ -41,7 +43,7 @@ class DataModule(LightningDataModule):
         :param stage:
         :return:
         """
-        train_dataset, dev_dataset, test_dataset = create_datasets(self.args)
+        train_dataset, dev_dataset, test_dataset = create_datasets(self.args, self.tokenizer)
         self.dataset = {
             "train": train_dataset, "validation": dev_dataset, "test": test_dataset
         }
@@ -53,7 +55,7 @@ class DataModule(LightningDataModule):
         :return:
         """
         loader = DataLoader(self.dataset["train"], batch_size=self.args.batch_size, drop_last=True, pin_memory=True,
-                        num_workers=self.args.num_workers, prefetch_factor=self.args.prefetch_factor)
+                        num_workers=self.args.num_workers, prefetch_factor=self.args.prefetch_factor, persistent_workers=True, collate_fn=self.data_collator)
         return loader
 
 
@@ -63,11 +65,11 @@ class DataModule(LightningDataModule):
         :return:
         """
         loader = DataLoader(self.dataset["validation"], batch_size=self.args.val_batch_size, drop_last=False, pin_memory=True,
-                            num_workers=self.args.num_workers, prefetch_factor=self.args.prefetch_factor)
+                            num_workers=self.args.num_workers, prefetch_factor=self.args.prefetch_factor, persistent_workers=True, collate_fn=self.data_collator)
         return loader
 
 
     def test_dataloader(self):
         loader = DataLoader(self.dataset["test"], batch_size=self.args.test_batch_size, drop_last=False, pin_memory=False,
-                        num_workers=self.args.num_workers, prefetch_factor=self.args.prefetch_factor)
+                        num_workers=self.args.num_workers, prefetch_factor=self.args.prefetch_factor, persistent_workers=True, collate_fn=self.data_collator)
         return loader

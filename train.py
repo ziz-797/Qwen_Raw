@@ -3,13 +3,23 @@ from pprint import pprint
 from configs.config import parser
 from dataset.data_module import DataModule
 from lightning_tools.callbacks import add_callbacks
-from models.R2GenGPT import R2GenGPT
+from models.Qwen3 import Qwen3
+from transformers import AutoTokenizer
 from lightning.pytorch import seed_everything
 import lightning.pytorch as pl
+# import debugpy
+# try:
+#     # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#     debugpy.listen(("localhost", 9501))
+#     print("Waiting for debugger attach")
+#     debugpy.wait_for_client()
+# except Exception as e:
+#     pass
 
  
 def train(args):
-    dm = DataModule(args)
+    tokenizer = AutoTokenizer.from_pretrained(args.qwen3_model)
+    dm = DataModule(args, tokenizer=tokenizer)
     callbacks = add_callbacks(args)
 
     trainer = pl.Trainer(
@@ -28,9 +38,9 @@ def train(args):
     )
 
     if args.ckpt_file is not None:
-        model = R2GenGPT.load_from_checkpoint(args.ckpt_file, strict=False)
+        model = Qwen3.load_from_checkpoint(args.ckpt_file, strict=False)
     else:
-        model = R2GenGPT(args)
+        model = Qwen3(args)
 
     if args.test:
         trainer.test(model, datamodule=dm)

@@ -60,7 +60,6 @@ class R2GenGPT(pl.LightningModule):
                 args.llama_model,
                 torch_dtype=torch.float16,
             )
-         
         if args.llm_use_lora:
             self.embed_tokens = self.llama_model.get_input_embeddings()
             peft_config = LoraConfig(
@@ -69,11 +68,15 @@ class R2GenGPT(pl.LightningModule):
             self.llama_model = get_peft_model(self.llama_model, peft_config)
             self.llama_model.print_trainable_parameters()
             print('Loading LLAMA LoRA Done')         
-        else:
+        elif args.freeze_llm:
             self.embed_tokens = self.llama_model.get_input_embeddings()
             for name, param in self.llama_model.named_parameters():
                 param.requires_grad = False
-            print('Loading LLAMA Done')
+            print('Loading Frozen LLAMA Done')
+        else:
+            self.embed_tokens = self.llama_model.get_input_embeddings()
+            self.llama_model.gradient_checkpointing_enable() 
+            print('Loading Trainable LLAMA (Full Fine-tuning) Done')
 
         self.llama_proj = nn.Linear(self.visual_encoder.num_features, self.llama_model.config.hidden_size)
         self.layer_norm = nn.LayerNorm(self.llama_model.config.hidden_size)

@@ -1,22 +1,24 @@
 import argparse
 
-parser = argparse.ArgumentParser(description="hyper-parameter for R2GenGPT")
+parser = argparse.ArgumentParser(description="hyper-parameter for Qwen3")
 # ========================= Dataset Configs ==========================
 parser.add_argument('--test', action='store_true', help="only run test set")
 parser.add_argument('--validate', action='store_true', help="only run validation set")
 parser.add_argument('--dataset', type=str, default='mimic_cxr', help="iu-xray or mimic-cxr")
 parser.add_argument('--annotation', type=str, default=r'./data/mimic_cxr/annotation.json', help="annotation file of the dataset")
-parser.add_argument('--base_dir', type=str, default=r'./data/mimic_cxr/images', help="base dir to help find images")
+parser.add_argument('--base_dir', type=str, default=r'/mnt/sdb/datasets/mimic_original/2.0.0/files', help="base dir to help find images")
+parser.add_argument('--patch_base_dir', type=str, default=r'/mnt/sda/datasets/mimic_patch/extracted_patches_new', help="base dir to help find images")
 parser.add_argument('--batch_size', default=6, type=int, help="use for training duration per worker")
 parser.add_argument('--val_batch_size', default=16, type=int, help="use for validation duration per worker")
 parser.add_argument('--test_batch_size', default=16, type=int, help="use for testing duration per worker")
 parser.add_argument('--prefetch_factor', default=4, type=int, help="use for training duration per worker")
 parser.add_argument('--num_workers', default=8, type=int, help="Cpu num for dataloaders")
-
+parser.add_argument('--image_size', default=384, type=int, help='image size for training')
 # ========================= Model Settings ============================
-parser.add_argument('--vision_model', default='microsoft/swin-base-patch4-window7-224', type=str, help="vision model to use")
-parser.add_argument('--llama_model', default='meta-llama/Llama-2-7b-chat-hf', type=str, help="LLM model to use")
+parser.add_argument('--vision_model', default=r'/mnt/sdb/pretrained_models/siglip2-so400m-patch14-384', type=str, help="vision model to use")
+parser.add_argument('--qwen3_model', default=r'/mnt/sdb/pretrained_models/Qwen3-0.6B', type=str, help="LLM model to use")
 parser.add_argument('--freeze_vm', default=True, type=lambda x: (str(x).lower() == 'true'), help='freeze vision model')
+parser.add_argument('--freeze_llm', default=True, type=lambda x: (str(x).lower() == 'true'), help='freeze LLM model')
 parser.add_argument('--llm_use_lora', default=False, type=lambda x: (str(x).lower() == 'true'), help="whether use lora for LLM model")
 parser.add_argument('--llm_r', default=16, type=int, help='The dimension used by the LoRA update matrices')
 parser.add_argument('--llm_alpha', default=16, type=int, help='Scaling factor.')
@@ -33,10 +35,10 @@ parser.add_argument('--savedmodel_path', type=str, default='save/mimic/v1')
 parser.add_argument('--ckpt_file', type=str, default=None, help='the checkpoint file to load')
 parser.add_argument('--delta_file', type=str, default=None, help='the delta file to load')
 parser.add_argument('--weights', type=list, default=[0.5, 0.5])
-parser.add_argument('--scorer_types', type=list, default=['Bleu_4', 'CIDEr'])
+parser.add_argument('--scorer_types', type=list, default=['Bleu_4', 'METEOR', 'Rouge'])
 
 # ========================= Learning Configs ==========================
-parser.add_argument('--learning_rate', default=1e-4, type=float, help='initial learning rate')
+parser.add_argument('--learning_rate', default=1e-5, type=float, help='initial learning rate')
 parser.add_argument('--gradient_clip_val', default=None, type=int, help='gradient clip value')
 
 # ========================= Decoding Settings ==========================
@@ -66,3 +68,4 @@ parser.add_argument('--every_n_train_steps', type=int, default=0, help='How many
 parser.add_argument('--val_check_interval', type=float, default=1.0, help='How often to check the validation set')
 parser.add_argument('--accumulate_grad_batches', type=int, default=1, help='Accumulates gradients over k batches before stepping the optimizer')
 parser.add_argument("--num_sanity_val_steps", type=int, default=2, help='Sanity check runs n validation batches before starting the training routine')
+parser.add_argument('--use_clinic_info', type=lambda x: (str(x).lower() == 'true'), default=True, help='use clinic info in the prompt')
