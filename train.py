@@ -53,7 +53,7 @@ def main():
     args = parser.parse_args()
     os.makedirs(args.savedmodel_path, exist_ok=True)
     pprint(vars(args))
-    seed_everything(42, workers=True)
+    seed_everything(64, workers=True)
     train(args)
 
 

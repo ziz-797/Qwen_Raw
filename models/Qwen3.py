@@ -1,6 +1,7 @@
 import os
 import json
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import lightning.pytorch as pl
 from transformers import Qwen3ForCausalLM, AutoTokenizer, Qwen3Config
@@ -12,6 +13,117 @@ from lightning_tools.optim import config_optimizer
 from peft import get_peft_model, LoraConfig, TaskType
 import pdb
 import evaluate
+
+
+def _infer_lora_target_modules(model):
+    """Infer LoRA target modules from common Qwen/Qwen3 naming patterns."""
+    preferred_suffixes = [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+        "in_proj_qkv",
+        "in_proj_z",
+        "out_proj",
+    ]
+
+    discovered = set()
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        suffix = name.split(".")[-1]
+        if suffix in preferred_suffixes:
+            discovered.add(suffix)
+
+    if discovered:
+        return [s for s in preferred_suffixes if s in discovered]
+
+    # Fallback: if naming is unexpected, attach LoRA to all linear layers except lm_head.
+    fallback = set()
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            suffix = name.split(".")[-1]
+            if suffix != "lm_head":
+                fallback.add(suffix)
+    return sorted(list(fallback))
+
+
+def _gather_step_outputs(step_outputs):
+    """Gather per-rank step outputs to every rank in DDP, no-op otherwise.
+
+    Why: validation/test dataloaders are auto-wrapped with DistributedSampler
+    under DDP, so each rank only sees 1/N of the eval set. Without gathering,
+    metrics are computed on a fraction of the data and best-checkpoint
+    selection is biased. Must be called on ALL ranks (collective op).
+    """
+    if not (dist.is_available() and dist.is_initialized()):
+        return step_outputs
+    world_size = dist.get_world_size()
+    if world_size == 1:
+        return step_outputs
+    gathered = [None for _ in range(world_size)]
+    dist.all_gather_object(gathered, step_outputs)
+    merged = []
+    for shard in gathered:
+        merged.extend(shard)
+    return merged
+
+
+class PerceiverCrossAttention(nn.Module):
+    """
+    Perceiver cross-attention for multi-image fusion
+    Query: current image features
+    Key/Value: prior image features
+    (Defined only; not instantiated in the single-image baseline.)
+    """
+    def __init__(self, hidden_size, num_heads=8, num_layers=2):
+        super().__init__()
+        self.num_layers = num_layers
+        self.layers = nn.ModuleList([
+            nn.MultiheadAttention(
+                embed_dim=hidden_size,
+                num_heads=num_heads,
+                batch_first=True,
+                dropout=0.1
+            ) for _ in range(num_layers)
+        ])
+        self.layer_norms_attn = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+        self.ffns = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_size, hidden_size * 4),
+                nn.GELU(),
+                nn.Dropout(0.1),
+                nn.Linear(hidden_size * 4, hidden_size)
+            ) for _ in range(num_layers)
+        ])
+        self.layer_norms_ffn = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+
+    def forward(self, query_features, key_value_features):
+        """
+        Args:
+            query_features: [B, N_q, D] - current image
+            key_value_features: [B, N_kv, D] - prior image
+        Returns:
+            fused_features: [B, N_q, D]
+        """
+        x = query_features
+        for i in range(self.num_layers):
+            attn_out, _ = self.layers[i](
+                query=x,
+                key=key_value_features,
+                value=key_value_features
+            )
+            x = self.layer_norms_attn[i](x + attn_out)
+            ffn_out = self.ffns[i](x)
+            x = self.layer_norms_ffn[i](x + ffn_out)
+        return x
 
 
 class Qwen3(pl.LightningModule):
@@ -76,8 +188,15 @@ class Qwen3(pl.LightningModule):
         #     self.qwen3_model.resize_token_embeddings(len(self.qwen3_tokenizer))
         if args.llm_use_lora:
             self.embed_tokens = self.qwen3_model.get_input_embeddings()
+            lora_target_modules = _infer_lora_target_modules(self.qwen3_model)
+            print(f'LLM LoRA target_modules: {lora_target_modules}')
             peft_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM, inference_mode=False, r=args.llm_r, lora_alpha=args.llm_alpha, lora_dropout=args.lora_dropout
+                task_type=TaskType.CAUSAL_LM,
+                inference_mode=False,
+                r=args.llm_r,
+                lora_alpha=args.llm_alpha,
+                lora_dropout=args.lora_dropout,
+                target_modules=lora_target_modules,
             )
             self.qwen3_model = get_peft_model(self.qwen3_model, peft_config)
             self.qwen3_model.print_trainable_parameters()
@@ -103,15 +222,16 @@ class Qwen3(pl.LightningModule):
         self.bleu_metric = evaluate.load("bleu")
         self.meteor_metric = evaluate.load("meteor")
         if args.delta_file is not None:
+            print(f'Loading checkpoint from {args.delta_file} ...', flush=True)
             ckpt = torch.load(
                 args.delta_file,
-                map_location=torch.device(f'cuda:{torch.cuda.current_device()}'),
+                map_location='cpu',
                 weights_only=False,   # 关键：关闭安全模式
             )
+            print(f'Checkpoint loaded to CPU, applying state_dict ...', flush=True)
             state_dict = ckpt['model']
-            # state_dict = torch.load(args.delta_file, map_location=torch.device(f'cuda:{torch.cuda.current_device()}'))['model']
             self.load_state_dict(state_dict=state_dict, strict=False)
-            print(f'Load checkpoint from {args.delta_file}')
+            print(f'Load checkpoint from {args.delta_file}', flush=True)
 
 
     def score(self, ref, hypo):
@@ -328,7 +448,6 @@ class Qwen3(pl.LightningModule):
             return_tensors="pt",
             padding="longest",
             truncation=True,
-            max_length=self.hparams.max_length,
             add_special_tokens=False
         ).to(image[0].device)
         prompt_tokens = self.qwen3_tokenizer(
@@ -386,18 +505,20 @@ class Qwen3(pl.LightningModule):
         return output_text
 
     def on_validation_epoch_end(self):
+        # Collective op: must run on every rank before the rank-0 early return.
+        all_outputs = _gather_step_outputs(self.val_step_outputs)
         if not self.trainer.is_global_zero:
             self.val_step_outputs.clear()
             return
-        ref, hypo, ids = [], [], []
-        for i in self.val_step_outputs:
-            ref.extend(i['ref'])
-            hypo.extend(i['hypo'])
-            ids.extend(i['id'])
-
-        ref = {k:[v] for k, v in zip(ids, ref)}
-        hypo = {k:[v] for k, v in zip(ids, hypo)}
-        eval_res = self.score(ref=ref,hypo=hypo)
+        ref_map, hypo_map = {}, {}
+        for i in all_outputs:
+            for sid, r, h in zip(i['id'], i['ref'], i['hypo']):
+                # DistributedSampler pads the last batch by repeating samples;
+                # dict assignment naturally dedupes by id.
+                ref_map[sid] = [r]
+                hypo_map[sid] = [h]
+        ref, hypo = ref_map, hypo_map
+        eval_res = self.score(ref=ref, hypo=hypo)
         self.log_dict(eval_res, sync_dist=False, logger=True)
 
         result_folder = os.path.join(self.hparams.savedmodel_path, 'result')
@@ -426,7 +547,6 @@ class Qwen3(pl.LightningModule):
             return_tensors="pt",
             padding="longest",
             truncation=True,
-            max_length=self.hparams.max_length,
             add_special_tokens=False
         ).to(image[0].device)
         prompt_tokens = self.qwen3_tokenizer(
@@ -477,23 +597,30 @@ class Qwen3(pl.LightningModule):
     def on_test_epoch_end(self):
         """
         This function is called at the end of the test epoch.
-        It is recommended to test on single device to ensure each sample/batch gets evaluated exactly once. This is helpful to make sure benchmarking for research papers is done the right way. Otherwise, in a multi-device setting, samples could occur duplicated when DistributedSampler is used, for eg. with strategy="ddp". It replicates some samples on some devices to make sure all devices have same batch size in case of uneven inputs.
+        Step outputs are gathered across ranks before scoring so that under DDP
+        the full test set is evaluated and each sample is counted once
+        (DistributedSampler pads the tail by repeating samples; we dedupe by id
+        via dict assignment). Only rank 0 scores and writes result files.
         """
-        ref, hypo, ids = [], [], []
-        for i in self.test_step_outputs:
-            ref.extend(i['ref'])
-            hypo.extend(i['hypo'])
-            ids.extend(i['id'])
-
-        ref = {k:[v] for k, v in zip(ids, ref)}
-        hypo = {k:[v] for k, v in zip(ids, hypo)}
-        eval_res = self.score(ref=ref,hypo=hypo)
+        # Collective op: must run on every rank before the rank-0 early return.
+        all_outputs = _gather_step_outputs(self.test_step_outputs)
+        if not self.trainer.is_global_zero:
+            self.test_step_outputs.clear()
+            return
+        ref_map, hypo_map = {}, {}
+        for i in all_outputs:
+            for sid, r, h in zip(i['id'], i['ref'], i['hypo']):
+                ref_map[sid] = [r]
+                hypo_map[sid] = [h]
+        ref, hypo = ref_map, hypo_map
+        eval_res = self.score(ref=ref, hypo=hypo)
 
         result_folder = os.path.join(self.hparams.savedmodel_path, 'result')
         os.makedirs(result_folder, exist_ok=True)
         json.dump(hypo, open(os.path.join(result_folder, f"test_result.json"), 'w'))
         json.dump(ref, open(os.path.join(result_folder, 'test_refs.json'), 'w'))
-        self.print(f"Test result of {self.hparams.delta_file}: {eval_res}")
+        self.print(f"Test result of {self.hparams.delta_file}: {eval_res}, num_samples={len(ref)}")
+        self.test_step_outputs.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.learning_rate)

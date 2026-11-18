@@ -34,8 +34,8 @@ parser.add_argument('--end_sym', default='</s>', type=str)
 parser.add_argument('--savedmodel_path', type=str, default='save/mimic/v1')
 parser.add_argument('--ckpt_file', type=str, default=None, help='the checkpoint file to load')
 parser.add_argument('--delta_file', type=str, default=None, help='the delta file to load')
-parser.add_argument('--weights', type=list, default=[0.5, 0.5])
-parser.add_argument('--scorer_types', type=list, default=['Bleu_4', 'METEOR', 'Rouge'])
+parser.add_argument('--weights', type=list, default=[1, 0.2])
+parser.add_argument('--scorer_types', type=list, default=['Bleu_4', 'METEOR', 'ROUGE_L'])
 
 # ========================= Learning Configs ==========================
 parser.add_argument('--learning_rate', default=1e-5, type=float, help='initial learning rate')
